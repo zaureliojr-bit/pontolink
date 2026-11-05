@@ -1,0 +1,20 @@
+{
+  "name": "pontolink",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --env-file=.env server.js"
+  },
+  "dependencies": {
+    "@vladmandic/face-api": "^1.7.12",
+    "better-sqlite3": "^11.0.0",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "selfsigned": "^2.4.1"
+  },
+  "engines": {
+    "node": ">=20.6"
+  }
+}

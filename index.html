@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PontoLink</title>
+<style>
+:root{--bg:#f6f7f5;--surface:#fff;--ink:#1c2420;--muted:#66726c;--line:#dde3df;--green:#0e5a47;--green-ink:#fff;--warn:#b25e00;--bad:#b3261e;--ok-bg:#e3f2ec}
+@media (prefers-color-scheme:dark){:root{--bg:#131a17;--surface:#1b2420;--ink:#eaf0ec;--muted:#93a29a;--line:#2d3a34;--green:#3fb391;--green-ink:#08231b;--warn:#e0a04a;--bad:#ff8a80;--ok-bg:#183328}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,"Segoe UI",sans-serif}
+header{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--surface)}
+nav button{background:none;border:0;font:inherit;color:var(--muted);padding:8px 14px;cursor:pointer;border-bottom:2px solid transparent}
+nav button[aria-selected=true]{color:var(--ink);border-color:var(--green);font-weight:600}
+main{max-width:980px;margin:0 auto;padding:20px}
+.clock{font-size:clamp(48px,12vw,96px);font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1}
+.date{color:var(--muted);margin:6px 0 22px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+button,input,select{font:inherit}
+.emp{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px;text-align:left;cursor:pointer;color:var(--ink)}
+.emp strong{display:block;font-size:18px}.emp span{color:var(--muted);font-size:14px}
+.emp:disabled{opacity:.5;cursor:default}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:18px;display:grid;gap:14px;max-width:460px}
+video{width:100%;border-radius:8px;background:#000;transform:scaleX(-1);aspect-ratio:4/3;object-fit:cover}
+input,select{padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);width:100%}
+.primary{background:var(--green);color:var(--green-ink);border:0;border-radius:8px;padding:14px;font-weight:600;cursor:pointer}
+.ghost{background:none;border:1px solid var(--line);border-radius:8px;padding:12px;color:var(--ink);cursor:pointer}
+.msg{padding:10px 12px;border-radius:8px;background:var(--ok-bg)}.msg.err{background:transparent;border:1px solid var(--bad);color:var(--bad)}
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);border-radius:10px;font-size:14px}
+th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:500}.pos{color:var(--green)}.neg{color:var(--bad)}
+.chip{display:inline-block;margin:0 6px 4px 0;white-space:nowrap}
+.chip button{background:none;border:0;color:var(--muted);cursor:pointer;padding:0 2px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}.row>*{flex:1;min-width:140px}
+h2{margin:26px 0 8px;font-size:18px}
+.overflow{overflow-x:auto}
+.note{color:var(--muted);font-size:13px;margin:8px 0 0}
+@media print{header,.noprint,.chip button{display:none!important}body{background:#fff;color:#000}main{padding:0}}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--green);outline-offset:2px}
+</style>
+<script defer src="/vendor/face-api.js"></script>
+</head>
+<body>
+<header>
+  <strong>PontoLink</strong>
+  <nav role="tablist"><button id="t-kiosk" role="tab" aria-selected="true">Registrar ponto</button><button id="t-admin" role="tab" aria-selected="false">Gestor</button></nav>
+</header>
+<main id="app"></main>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const LABEL = { entrada: 'Entrada', saida_almoco: 'Saída para almoço', volta_almoco: 'Volta do almoço', saida: 'Saída' };
+const fmtTime = (iso) => new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
+const fmtDateTime = (iso) => new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Sao_Paulo' });
+const fmtMin = (m) => (m < 0 ? '-' : '') + Math.floor(Math.abs(m) / 60) + 'h' + String(Math.abs(m) % 60).padStart(2, '0');
+let stream = null, adminPin = sessionStorage.getItem('adminPin') || '';
+
+async function api(url, opts = {}) {
+  const r = await fetch(url, { ...opts, headers: { 'Content-Type': 'application/json', 'x-admin-pin': adminPin, 'x-device-token': localStorage.getItem('deviceToken') || '', ...(opts.headers || {}) }, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const data = r.headers.get('content-type')?.includes('json') ? await r.json() : null;
+  if (!r.ok) { const err = new Error(data?.error || 'Erro ' + r.status); err.code = data?.code; throw err; }
+  return data;
+}
+let modelsReady;
+const loadModels = () => (modelsReady ||= Promise.all([
+  faceapi.nets.tinyFaceDetector.loadFromUri('/models'),
+  faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
+  faceapi.nets.faceRecognitionNet.loadFromUri('/models'),
+]).catch((e) => { modelsReady = null; throw e; }));
+async function faceOf(video) {
+  const r = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+  return r ? Array.from(r.descriptor) : null;
+}
+function stopCam() { stream?.getTracks().forEach((t) => t.stop()); stream = null; }
+function tab(name) {
+  stopCam();
+  $('#t-kiosk').setAttribute('aria-selected', name === 'kiosk');
+  $('#t-admin').setAttribute('aria-selected', name === 'admin');
+  name === 'kiosk' ? kiosk() : admin();
+}
+$('#t-kiosk').onclick = () => tab('kiosk');
+$('#t-admin').onclick = () => tab('admin');
+
+/* ---------- Balcão ---------- */
+let clockTimer;
+async function kiosk() {
+  clearInterval(clockTimer);
+  $('#app').innerHTML = `<div class="clock" id="clock"></div><div class="date" id="date"></div><h2 style="margin-top:0">Quem está registrando?</h2><div class="grid" id="list">Carregando…</div>`;
+  const tick = () => { const n = new Date(); $('#clock') && ($('#clock').textContent = n.toLocaleTimeString('pt-BR')); $('#date') && ($('#date').textContent = n.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })); };
+  tick(); clockTimer = setInterval(tick, 1000);
+  try {
+    const emps = await api('/api/employees');
+    $('#list').innerHTML = emps.length ? emps.map((e) => `<button class="emp" data-id="${e.id}" ${e.next && e.has_face ? '' : 'disabled'}><strong>${esc(e.name)}</strong><span>${!e.has_face ? 'Rosto não cadastrado' : e.next ? 'Próximo: ' + LABEL[e.next] : 'Dia completo'}</span></button>`).join('') : 'Nenhum funcionário cadastrado. Cadastre na aba Gestor.';
+    $('#list').onclick = (ev) => { const b = ev.target.closest('.emp'); if (b && !b.disabled) punchPanel(emps.find((e) => e.id == b.dataset.id)); };
+  } catch (e) { e.code === 'device_unpaired' ? pairPanel() : ($('#list').textContent = e.message); }
+}
+function pairPanel() {
+  clearInterval(clockTimer);
+  $('#app').innerHTML = `<div class="panel"><h2 style="margin:0">Autorizar este aparelho</h2><p class="note" style="margin:0">Este celular ainda não pode registrar ponto. O gestor autoriza com o PIN dele.</p><input id="dname" placeholder="Nome do aparelho (ex.: Celular do balcão)"><input id="dpin" type="password" inputmode="numeric" autocomplete="off" placeholder="PIN do gestor"><div id="out"></div><button class="primary" id="dgo">Autorizar</button></div>`;
+  $('#dgo').onclick = async () => {
+    try {
+      const r = await api('/api/pair', { method: 'POST', headers: { 'x-admin-pin': $('#dpin').value }, body: { name: $('#dname').value } });
+      localStorage.setItem('deviceToken', r.token);
+      kiosk();
+    } catch (e) { $('#out').innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  };
+}
+async function punchPanel(emp) {
+  $('#app').innerHTML = `<div class="panel"><h2 style="margin:0">${esc(emp.name)}</h2><video id="cam" autoplay playsinline muted></video><input id="pin" type="password" inputmode="numeric" autocomplete="off" placeholder="Seu PIN" maxlength="6"><div id="out"></div><button class="primary" id="go">Registrar ${esc(LABEL[emp.next].toLowerCase())}</button><button class="ghost" id="back">Voltar</button></div>`;
+  $('#back').onclick = () => { stopCam(); kiosk(); };
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480 }, audio: false });
+    $('#cam').srcObject = stream;
+  } catch { $('#out').innerHTML = '<div class="msg err">Não foi possível abrir a câmera. Permita o acesso e use https:// ou localhost.</div>'; $('#go').disabled = true; return; }
+  if (emp.has_face) {
+    $('#go').disabled = true; $('#out').innerHTML = '<div class="msg">Preparando reconhecimento facial…</div>';
+    try { await loadModels(); $('#out').innerHTML = ''; $('#go').disabled = false; }
+    catch { $('#out').innerHTML = '<div class="msg err">Falha ao carregar o reconhecimento facial.</div>'; return; }
+  }
+  $('#go').onclick = async () => {
+    const v = $('#cam'), c = document.createElement('canvas');
+    $('#go').disabled = true;
+    let descriptor = null;
+    if (emp.has_face) {
+      descriptor = await faceOf(v);
+      if (!descriptor) { $('#out').innerHTML = '<div class="msg err">Rosto não detectado. Olhe para a câmera.</div>'; $('#go').disabled = false; return; }
+    }
+    c.width = 480; c.height = Math.round(480 * (v.videoHeight || 360) / (v.videoWidth || 480));
+    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+    $('#go').disabled = true;
+    try {
+      const r = await api('/api/punch', { method: 'POST', body: { employee_id: emp.id, pin: $('#pin').value, photo: c.toDataURL('image/jpeg', 0.7), descriptor } });
+      stopCam();
+      $('#app').innerHTML = `<div class="panel"><div class="msg"><strong>${esc(LABEL[r.type])} registrada</strong><br>${esc(r.name)} · ${fmtTime(r.ts)}</div></div>`;
+      setTimeout(kiosk, 4000);
+    } catch (e) { $('#out').innerHTML = `<div class="msg err">${esc(e.message)}</div>`; $('#go').disabled = false; $('#pin').value = ''; $('#pin').focus(); }
+  };
+  $('#pin').focus();
+}
+
+/* ---------- Cadastro de rosto ---------- */
+async function enrollPanel(emp) {
+  $('#app').innerHTML = `<div class="panel"><h2 style="margin:0">Cadastrar rosto: ${esc(emp.name)}</h2><video id="cam" autoplay playsinline muted></video><div id="out"><div class="msg">Carregando reconhecimento facial…</div></div><button class="primary" id="go" disabled>Capturar rosto</button><button class="ghost" id="back">Voltar</button></div>`;
+  $('#back').onclick = () => { stopCam(); admin(); };
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480 }, audio: false });
+    $('#cam').srcObject = stream;
+    await loadModels();
+  } catch { $('#out').innerHTML = '<div class="msg err">Falha ao abrir a câmera ou carregar os modelos. Use https:// ou localhost.</div>'; return; }
+  $('#out').innerHTML = '<div class="msg">Peça para olhar de frente, com boa luz, sem boné nem óculos escuros.</div>';
+  $('#go').disabled = false;
+  $('#go').onclick = async () => {
+    $('#go').disabled = true;
+    const samples = [];
+    for (let i = 0; i < 6 && samples.length < 3; i++) {
+      const d = await faceOf($('#cam')); if (d) samples.push(d);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (samples.length < 3) { $('#out').innerHTML = '<div class="msg err">Não consegui detectar o rosto 3 vezes. Ajuste a luz e tente de novo.</div>'; $('#go').disabled = false; return; }
+    const avg = samples[0].map((_, i) => samples.reduce((s, d) => s + d[i], 0) / samples.length);
+    try { await api(`/api/admin/employees/${emp.id}/face`, { method: 'POST', body: { descriptor: avg } }); stopCam(); admin(); }
+    catch (e) { $('#out').innerHTML = `<div class="msg err">${esc(e.message)}</div>`; $('#go').disabled = false; }
+  };
+}
+
+/* ---------- Gestor ---------- */
+async function admin() {
+  clearInterval(clockTimer);
+  if (!adminPin) {
+    $('#app').innerHTML = `<div class="panel"><h2 style="margin:0">Acesso do gestor</h2><input id="apin" type="password" placeholder="PIN do gestor"><div id="out"></div><button class="primary" id="ok">Entrar</button></div>`;
+    $('#ok').onclick = async () => {
+      adminPin = $('#apin').value;
+      try { await api('/api/admin/employees'); sessionStorage.setItem('adminPin', adminPin); admin(); }
+      catch (e) { adminPin = ''; $('#out').innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+    };
+    return;
+  }
+  const month = $('#month')?.value || new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' }).slice(0, 7);
+  const fe = $('#fe')?.value || '';
+  let emps, rep, st, log, dev;
+  try { [emps, rep, st, log, dev] = await Promise.all([api('/api/admin/employees'), api('/api/admin/report?month=' + month + '&employee=' + fe), api('/api/admin/status'), api('/api/admin/audit'), api('/api/admin/devices')]); }
+  catch (e) { adminPin = ''; sessionStorage.removeItem('adminPin'); return admin(); }
+
+  const sumRows = rep.summary.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.days_worked}</td><td>${fmtMin(s.worked_min)}</td><td>${fmtMin(s.expected_min)}</td><td class="${s.balance_min < 0 ? 'neg' : 'pos'}"><strong>${fmtMin(s.balance_min)}</strong></td><td>${s.open_days ? `<span class="neg">${s.open_days}</span>` : '0'}</td><td><button class="ghost" data-espelho="${s.employee_id}" style="padding:6px 10px">Espelho</button></td></tr>`).join('');
+  const fopts = '<option value="">Todos os funcionários</option>' + emps.map((e) => `<option value="${e.id}" ${String(e.id) === fe ? 'selected' : ''}>${esc(e.name)}</option>`).join('');
+  const opts = emps.filter((e) => e.active).map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join('');
+  const rows = rep.days.map((d) => `<tr><td>${d.day.split('-').reverse().join('/')}</td><td>${esc(d.name)}</td><td>${d.punches.map((p) => `<span class="chip" title="${esc(p.note || '')}">${esc(LABEL[p.type])} ${fmtTime(p.ts)}${p.manual ? ' ✎' : ''}${p.has_photo ? ` <button data-photo="${p.id}" aria-label="Ver foto">foto</button>` : ''}<button data-del="${p.id}" aria-label="Excluir marcação">×</button></span>`).join('')}</td><td>${fmtMin(d.worked_min)} / ${fmtMin(d.jornada_min)}</td><td class="${d.balance_min == null ? '' : d.balance_min < 0 ? 'neg' : 'pos'}">${d.balance_min == null ? 'em aberto' : fmtMin(d.balance_min)}</td></tr>`).join('');
+
+  $('#app').innerHTML = `
+  ${st.default_pin ? '<div class="msg err noprint" style="margin-bottom:12px">Você ainda usa o PIN padrão do gestor. <button class="ghost" data-mypin="1" style="margin-left:8px;padding:6px 10px">Trocar agora</button></div>' : ''}
+  <div class="row noprint"><input type="month" id="month" value="${esc(rep.month)}"><select id="fe" aria-label="Funcionário">${fopts}</select><button class="ghost" id="csv">Exportar CSV</button><button class="ghost" id="print">Imprimir</button><button class="ghost" id="espall">Espelho de todos</button></div>
+  <h2 style="margin-top:0">Resumo de ${esc(rep.month.split('-').reverse().join('/'))}</h2>
+  <div class="overflow"><table><thead><tr><th>Funcionário</th><th>Dias trabalhados</th><th>Total trabalhado</th><th>Previsto</th><th>Saldo do mês</th><th>Dias em aberto</th><th></th></tr></thead><tbody>${sumRows || '<tr><td colspan="7">Sem marcações neste mês.</td></tr>'}</tbody></table></div>
+  <p class="note">Os totais contam só dias completos (com saída). Dias em aberto precisam de marcação manual.</p>
+  <h2>Dia a dia</h2>
+  <div class="overflow"><table><thead><tr><th>Dia</th><th>Funcionário</th><th>Marcações</th><th>Trabalhado / jornada</th><th>Saldo</th></tr></thead><tbody>${rows || '<tr><td colspan="5">Sem marcações neste mês.</td></tr>'}</tbody></table></div>
+  <div class="noprint"><h2>Marcação manual</h2>
+  <div class="row"><select id="m-emp">${opts}</select><select id="m-type">${Object.entries(LABEL).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select><input type="datetime-local" id="m-dt"><input id="m-note" placeholder="Justificativa (obrigatória)"><button class="primary" id="m-go">Adicionar</button></div>
+  <h2>Funcionários</h2>
+  <div class="row"><input id="n-name" placeholder="Nome"><input id="n-pin" placeholder="PIN (4 a 6 dígitos)" inputmode="numeric" maxlength="6"><input id="n-jor" inputmode="decimal" aria-label="Jornada diária em horas" placeholder="Jornada em horas (padrão 8)"><button class="primary" id="n-go">Cadastrar</button></div>
+  <div class="grid">${emps.map((e) => `<div class="emp"><strong>${esc(e.name)}</strong><span>${e.active ? 'Ativo' : 'Inativo'} · ${e.has_face ? 'rosto cadastrado' : 'sem rosto'} · jornada ${fmtMin(e.jornada_min)}</span><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="ghost" data-toggle="${e.id}" data-active="${e.active}">${e.active ? 'Desativar' : 'Ativar'}</button><button class="ghost" data-enroll="${e.id}" data-name="${esc(e.name)}">${e.has_face ? 'Refazer rosto' : 'Cadastrar rosto'}</button><button class="ghost" data-jor="${e.id}" data-h="${e.jornada_min}" data-tol="${e.tolerance_min}">Jornada</button><button class="ghost" data-rename="${e.id}" data-name="${esc(e.name)}">Editar nome</button><button class="ghost" data-newpin="${e.id}" data-name="${esc(e.name)}">Novo PIN</button></div></div>`).join('')}</div>
+  <h2>Aparelhos autorizados</h2><div class="overflow"><table><thead><tr><th>Aparelho</th><th>Autorizado em</th><th>Último uso</th><th></th></tr></thead><tbody>${dev.map((d) => `<tr><td>${esc(d.name)}</td><td>${fmtDateTime(d.created_ts)}</td><td>${d.last_seen ? fmtDateTime(d.last_seen) : '—'}</td><td><button class="ghost" data-revoke="${d.id}" data-name="${esc(d.name)}">Revogar</button></td></tr>`).join('') || '<tr><td colspan="4">Nenhum aparelho autorizado.</td></tr>'}</tbody></table></div><p class="note">Só aparelhos autorizados registram ponto. Para autorizar o celular da loja, abra o PontoLink nele e use o PIN do gestor.</p>
+  <h2>Histórico de alterações</h2><div class="overflow"><table><thead><tr><th>Quando</th><th>O que mudou</th></tr></thead><tbody>${log.map((l) => `<tr><td style="white-space:nowrap">${fmtDateTime(l.ts)}</td><td>${esc(l.detail)}</td></tr>`).join('') || '<tr><td colspan="2">Nenhuma alteração registrada.</td></tr>'}</tbody></table></div><p class="note">Mostra as últimas 100 alterações feitas no painel do gestor.</p>
+  <h2>Backup</h2><p class="note">Baixe e guarde fora do Railway (Drive, HD externo). O banco tem funcionários, marcações e histórico; as fotos vêm em um arquivo separado.</p><div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"><button class="ghost" data-backup="db">Baixar backup do banco</button><button class="ghost" data-backup="photos">Baixar backup das fotos</button></div>
+  <h2>Segurança</h2><button class="ghost" data-mypin="1">Trocar PIN do gestor</button></div><div id="out" style="margin-top:12px"></div>`;
+
+  const run = async (fn) => { try { await fn(); admin(); } catch (e) { $('#out').innerHTML = `<div class="msg err">${esc(e.message)}</div>`; } };
+  $('#month').onchange = admin;
+  $('#fe').onchange = admin;
+  $('#print').onclick = () => window.print();
+  $('#espall').onclick = () => { location.href = '/espelho.html?month=' + rep.month + '&employee=all'; };
+  $('#n-go').onclick = () => run(() => api('/api/admin/employees', { method: 'POST', body: { name: $('#n-name').value, pin: $('#n-pin').value, jornada_min: Math.round(parseFloat(($('#n-jor').value || '8').replace(',', '.')) * 60) } }));
+  $('#m-go').onclick = () => run(() => api('/api/admin/punches', { method: 'POST', body: { employee_id: $('#m-emp').value, type: $('#m-type').value, datetime: $('#m-dt').value, note: $('#m-note').value } }));
+  $('#csv').onclick = () => {
+    const lines = ['Dia;Funcionario;Marcacoes;Trabalhado (min);Saldo (min)', ...rep.days.map((d) => [d.day, d.name, d.punches.map((p) => LABEL[p.type] + ' ' + fmtTime(p.ts)).join(' | '), d.worked_min, d.balance_min ?? ''].join(';'))];
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv' })), download: `pontolink-${rep.month}.csv` });
+    a.click();
+  };
+  $('#app').onclick = async (ev) => {
+    const t = ev.target;
+    if (t.dataset.toggle) run(() => api('/api/admin/employees/' + t.dataset.toggle, { method: 'PATCH', body: { active: t.dataset.active !== '1' } }));
+    if (t.dataset.enroll) enrollPanel({ id: t.dataset.enroll, name: t.dataset.name });
+    if (t.dataset.espelho) location.href = '/espelho.html?month=' + rep.month + '&employee=' + t.dataset.espelho;
+    if (t.dataset.revoke && confirm('Revogar o aparelho "' + t.dataset.name + '"? Ele deixa de registrar ponto.')) run(() => api('/api/admin/devices/' + t.dataset.revoke, { method: 'DELETE' }));
+    if (t.dataset.backup) {
+      const r = await fetch('/api/admin/backup/' + t.dataset.backup, { headers: { 'x-admin-pin': adminPin } });
+      if (!r.ok) { $('#out').innerHTML = '<div class="msg err">Falha ao gerar o backup.</div>'; return; }
+      const d = new Date().toISOString().slice(0, 10);
+      Object.assign(document.createElement('a'), { href: URL.createObjectURL(await r.blob()), download: t.dataset.backup === 'db' ? `pontolink-banco-${d}.db` : `pontolink-fotos-${d}.tar.gz` }).click();
+    }
+    if (t.dataset.mypin) {
+      const p1 = prompt('Novo PIN do gestor (8 a 12 dígitos):'); if (p1 === null) return;
+      const p2 = prompt('Repita o novo PIN:'); if (p2 === null) return;
+      if (p1 !== p2) { $('#out').innerHTML = '<div class="msg err">Os PINs não são iguais.</div>'; return; }
+      try { await api('/api/admin/pin', { method: 'POST', body: { new_pin: p1 } }); adminPin = p1; sessionStorage.setItem('adminPin', p1); admin(); }
+      catch (e) { $('#out').innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+    }
+    if (t.dataset.rename) {
+      const n = prompt('Nome do funcionário:', t.dataset.name); if (n === null) return;
+      run(() => api('/api/admin/employees/' + t.dataset.rename, { method: 'PATCH', body: { name: n } }));
+    }
+    if (t.dataset.newpin) {
+      const p = prompt('Novo PIN para ' + t.dataset.name + ' (4 a 6 dígitos):'); if (p === null) return;
+      run(() => api('/api/admin/employees/' + t.dataset.newpin, { method: 'PATCH', body: { pin: p } }));
+    }
+    if (t.dataset.jor) {
+      const h = prompt('Jornada diária em horas (ex.: 8 ou 6,5):', String(t.dataset.h / 60).replace('.', ','));
+      if (h === null) return;
+      const tol = prompt('Tolerância diária em minutos (a CLT admite até 10):', t.dataset.tol);
+      if (tol === null) return;
+      run(() => api('/api/admin/employees/' + t.dataset.jor, { method: 'PATCH', body: { jornada_min: Math.round(parseFloat(h.replace(',', '.')) * 60), tolerance_min: parseInt(tol, 10) } }));
+    }
+    if (t.dataset.del && confirm('Excluir esta marcação?')) run(() => api('/api/admin/punches/' + t.dataset.del, { method: 'DELETE' }));
+    if (t.dataset.photo) {
+      const r = await fetch('/api/admin/photo/' + t.dataset.photo, { headers: { 'x-admin-pin': adminPin } });
+      if (r.ok) window.open(URL.createObjectURL(await r.blob()), '_blank');
+    }
+  };
+}
+kiosk();
+</script>
+</body>
+</html>
