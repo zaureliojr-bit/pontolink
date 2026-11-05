@@ -15,6 +15,6 @@
     "selfsigned": "^2.4.1"
   },
   "engines": {
-    "node": ">=20.6"
+    "node": "22.x"
   }
 }
